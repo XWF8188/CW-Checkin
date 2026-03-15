@@ -2,17 +2,17 @@ let domain = "这里填机场域名";
 let user = "这里填邮箱";
 let pass = "这里填密码";
 let 签到结果;
-let BotToken ='';
-let ChatID =''; 
+let BotToken = '';
+let ChatID = '';
 
 export default {
 	// HTTP 请求处理函数保持不变
 	async fetch(request, env, ctx) {
 		await initializeVariables(env);
 		const url = new URL(request.url);
-		if(url.pathname == "/tg") {
+		if (url.pathname == "/tg") {
 			await sendMessage();
-		} else if (url.pathname == `/${pass}`){
+		} else if (url.pathname == `/${pass}`) {
 			await checkin();
 		}
 		return new Response(签到结果, {
@@ -23,13 +23,13 @@ export default {
 
 	// 定时任务处理函数
 	async scheduled(controller, env, ctx) {
-		console.log('Cron job started');
+		console.log('定时任务开始执行');
 		try {
 			await initializeVariables(env);
 			await checkin();
-			console.log('Cron job completed successfully');
+			console.log('定时任务执行成功');
 		} catch (error) {
-			console.error('Cron job failed:', error);
+			console.error('定时任务执行失败:', error);
 			签到结果 = `定时任务执行失败: ${error.message}`;
 			await sendMessage(签到结果);
 		}
@@ -40,7 +40,7 @@ async function initializeVariables(env) {
 	domain = env.JC || env.DOMAIN || domain;
 	user = env.ZH || env.USER || user;
 	pass = env.MM || env.PASS || pass;
-	if(!domain.includes("//")) domain = `https://${domain}`;
+	if (!domain.includes("//")) domain = `https://${domain}`;
 	BotToken = env.TGTOKEN || BotToken;
 	ChatID = env.TGID || ChatID;
 	签到结果 = `地址: ${domain.substring(0, 9)}****${domain.substring(domain.length - 5)}\n账号: ${user.substring(0, 1)}****${user.substring(user.length - 5)}\n密码: ${pass.substring(0, 1)}****${pass.substring(pass.length - 1)}\n\nTG推送: ${ChatID ? `${ChatID.substring(0, 1)}****${ChatID.substring(ChatID.length - 3)}` : "未启用"}`;
@@ -75,99 +75,123 @@ async function sendMessage(msg = "") {
 	}
 }
 
-// checkin 函数修改
+// 带重试机制的 checkin 函数
 async function checkin() {
-	try {
-		if (!domain || !user || !pass) {
-			throw new Error('必需的配置参数缺失');
+	const maxRetries = 3;
+	const retryDelay = 5000;
+
+	for (let attempt = 1; attempt <= maxRetries; attempt++) {
+		try {
+			console.log(`[第 ${attempt} 次尝试] 开始执行签到流程...`);
+			await doCheckin();
+			console.log(`[第 ${attempt} 次尝试] 签到流程执行成功！`);
+			await sendMessage(签到结果);
+			return 签到结果;
+		} catch (error) {
+			console.error(`[第 ${attempt} 次尝试] 签到执行失败:`, error);
+			if (attempt === maxRetries) {
+				签到结果 = `签到过程发生错误 (重试 ${maxRetries} 次后失败):\n${error.message}`;
+				await sendMessage(签到结果);
+				return 签到结果;
+			} else {
+				console.log(`等待 ${retryDelay / 1000} 秒后进行重试...`);
+				await new Promise(resolve => setTimeout(resolve, retryDelay));
+			}
 		}
+	}
+}
 
-		// 登录请求
-		const loginResponse = await fetch(`${domain}/auth/login`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
-				'Accept': 'application/json, text/plain, */*',
-				'Origin': domain,
-				'Referer': `${domain}/auth/login`,
-			},
-			body: JSON.stringify({
-				email: user,
-				passwd: pass,
-				remember_me: 'on',
-				code: "",
-			}),
-		});
+async function doCheckin() {
+	if (!domain || !user || !pass) {
+		throw new Error('必需的配置参数缺失');
+	}
 
-		console.log('Login Response Status:', loginResponse.status);
-		
-		if (!loginResponse.ok) {
-			const errorText = await loginResponse.text();
-			throw new Error(`登录请求失败: ${errorText}`);
+	// 登录请求
+	const loginResponse = await fetch(`${domain}/auth/login`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+			'Accept': 'application/json, text/plain, */*',
+			'Origin': domain,
+			'Referer': `${domain}/auth/login`,
+		},
+		body: JSON.stringify({
+			email: user,
+			passwd: pass,
+			remember_me: 'on',
+			code: "",
+		}),
+	});
+
+	console.log('登录响应状态码:', loginResponse.status);
+
+	if (!loginResponse.ok) {
+		const errorText = await loginResponse.text();
+		throw new Error(`登录请求失败 (HTTP ${loginResponse.status}): ${errorText}`);
+	}
+
+	const loginJson = await loginResponse.json();
+	console.log('登录响应数据:', loginJson);
+
+	if (loginJson.ret !== 1) {
+		throw new Error(`登录失败: ${loginJson.msg || '未知错误'}`);
+	}
+
+	// 获取 Cookie
+	let cookies = "";
+	if (loginResponse.headers.getSetCookie) {
+		const setCookies = loginResponse.headers.getSetCookie();
+		if (!setCookies || setCookies.length === 0) {
+			throw new Error('登录成功但未收到Cookie (getSetCookie 返回空)');
 		}
-
-		const loginJson = await loginResponse.json();
-		console.log('Login Response:', loginJson);
-
-		if (loginJson.ret !== 1) {
-			throw new Error(`登录失败: ${loginJson.msg || '未知错误'}`);
-		}
-
-		// 获取 Cookie
+		console.log('收到的原始 Cookie 数组:', setCookies);
+		cookies = setCookies.map(cookie => cookie.split(';')[0]).join('; ');
+	} else {
+		// 降级兼容：防止直接用逗号切分导致 expires 字段被截断
 		const cookieHeader = loginResponse.headers.get('set-cookie');
 		if (!cookieHeader) {
-			throw new Error('登录成功但未收到Cookie');
+			throw new Error('登录成功但未收到Cookie (set-cookie 头为空)');
 		}
+		console.log('收到的原始 Cookie 字符串:', cookieHeader);
+		cookies = cookieHeader.split(/,(?=\s*[a-zA-Z0-9_-]+\s*=)/).map(cookie => cookie.split(';')[0]).join('; ');
+	}
 
-		console.log('Received cookies:', cookieHeader);
-		const cookies = cookieHeader.split(',').map(cookie => cookie.split(';')[0]).join('; ');
+	// 等待确保登录状态
+	await new Promise(resolve => setTimeout(resolve, 1000));
 
-		// 等待确保登录状态
-		await new Promise(resolve => setTimeout(resolve, 1000));
+	// 签到请求
+	const checkinResponse = await fetch(`${domain}/user/checkin`, {
+		method: 'POST',
+		headers: {
+			'Cookie': cookies,
+			'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+			'Accept': 'application/json, text/plain, */*',
+			'Content-Type': 'application/json',
+			'Origin': domain,
+			'Referer': `${domain}/user/panel`,
+			'X-Requested-With': 'XMLHttpRequest'
+		},
+	});
 
-		// 签到请求
-		const checkinResponse = await fetch(`${domain}/user/checkin`, {
-			method: 'POST',
-			headers: {
-				'Cookie': cookies,
-				'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
-				'Accept': 'application/json, text/plain, */*',
-				'Content-Type': 'application/json',
-				'Origin': domain,
-				'Referer': `${domain}/user/panel`,
-				'X-Requested-With': 'XMLHttpRequest'
-			},
-		});
+	console.log('签到响应状态码:', checkinResponse.status);
 
-		console.log('Checkin Response Status:', checkinResponse.status);
+	const responseText = await checkinResponse.text();
+	console.log('签到原始响应数据:', responseText);
 
-		const responseText = await checkinResponse.text();
-		console.log('Checkin Raw Response:', responseText);
+	try {
+		const checkinResult = JSON.parse(responseText);
+		console.log('签到解析结果:', checkinResult);
 
-		try {
-			const checkinResult = JSON.parse(responseText);
-			console.log('Checkin Result:', checkinResult);
-			
-			if (checkinResult.ret === 1 || checkinResult.ret === 0) {
-				签到结果 = `🎉 签到结果 🎉\n ${checkinResult.msg || (checkinResult.ret === 1 ? '签到成功' : '签到失败')}`;
-			} else {
-				签到结果 = `🎉 签到结果 🎉\n ${checkinResult.msg || '签到结果未知'}`;
-			}
-		} catch (e) {
-			if (responseText.includes('登录')) {
-				throw new Error('登录状态无效，请检查Cookie处理');
-			}
-			throw new Error(`解析签到响应失败: ${e.message}\n\n原始响应: ${responseText}`);
+		if (checkinResult.ret === 1 || checkinResult.ret === 0) {
+			签到结果 = `🎉 签到结果 🎉\n ${checkinResult.msg || (checkinResult.ret === 1 ? '签到成功' : '签到失败')}`;
+		} else {
+			签到结果 = `🎉 签到结果 🎉\n ${checkinResult.msg || '签到结果未知'}`;
 		}
-
-		await sendMessage(签到结果);
-		return 签到结果;
-
-	} catch (error) {
-		console.error('Checkin Error:', error);
-		签到结果 = `签到过程发生错误: ${error.message}`;
-		await sendMessage(签到结果);
-		return 签到结果;
+	} catch (e) {
+		if (responseText.includes('登录') || responseText.includes('<html')) {
+			throw new Error('登录状态无效或Cookie未生效，返回了页面HTML');
+		}
+		throw new Error(`解析签到响应 JSON 失败: ${e.message}\n\n原始响应: ${responseText}`);
 	}
 }
